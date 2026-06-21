@@ -1,27 +1,42 @@
 """
 Bryant Luna-Ramos
 6/16/26
+
+
 """
-import requests
+import argparse
+import csv
+import re
 import sqlite3
-import xml.etree.ElementTree as ET
-import time
 
-API_URL     = "https://www.checkbooknyc.com/api"
-DB_PATH     = "diit_contracts.db"
-AGENCY_CODE = "18"     # NYC DOE's agency code
-PAGE_SIZE   = 1000      # records to pull per call, can handle max of 20k
+DB_PATH = "diit_contracts.db"
 
+'''
+CSV layer
+'''
 
-# Keywords used to flag likely DIIT / tech contracts from the purpose text,
-# since there's no server-side budget-code filter for Citywide agencies.
 DIIT_KEYWORDS = [
     "DIIT", "information technology", "instructional technology", "technology",
     "software", "hardware", "network", "server", "laptop", "desktop", "tablet",
     "chromebook", "wireless", "data center", "cabling", "IT services",
-    "computer", "device", "cyber", "telecommunications", "infrastructure", "system",
+    "IT support", "IT consulting", "cloud", "digital", "computer", "device", "cyber",
+    "telecommunications", "infrastructure", "system",
 ]
- 
+
+DIIT_EXCLUDE_PHRASES = [
+    "family child care",
+    "crisis management system",
+    "system-wide", "systemwide", "system wide",
+    "fire alarm", "fire suppression", "sprinkler", "standpipe",
+    "security system",
+    "hvac", "air condition", "boiler", "plumbing", "backflow", "fuel oil",
+    "public address system", "gas leak detection", "de-watering",
+    "kitchen exhaust", "water treatment", "direct digital control",
+    "window shades",
+    "legal process server",
+    "vendor does not have order in system", "doc posted in city",
+]
+
 REGISTERED_EXPENSE_COLUMNS = [
     "prime_contract_id", "contract_includes_sub_vendors", "prime_vendor",
     "prime_vendor_mwbe_category", "prime_contract_purpose",
@@ -31,13 +46,13 @@ REGISTERED_EXPENSE_COLUMNS = [
     "prime_contracting_agency", "prime_oca_number", "prime_contract_version",
     "parent_contract_id", "prime_contract_type", "prime_contract_award_method",
     "prime_contract_expense_category", "prime_contract_industry",
-    "prime_contract_pin", "prime_woman_owned_business", "prime_emerging_business",
-    "sub_vendor", "sub_contract_reference_id", "sub_vendor_mwbe_category",
-    "sub_contract_purpose", "sub_contract_status", "sub_contract_original_amount",
-    "sub_contract_current_amount", "sub_vendor_paid_to_date",
-    "sub_contract_start_date", "sub_contract_end_date",
-    "sub_woman_owned_business", "sub_emerging_business",
-    "document_code", "year", "contract_class",
+    "prime_contract_pin", "prime_woman_owned_business",
+    "prime_emerging_business", "sub_vendor", "sub_contract_reference_id",
+    "sub_vendor_mwbe_category", "sub_contract_purpose", "sub_contract_status",
+    "sub_contract_original_amount", "sub_contract_current_amount",
+    "sub_vendor_paid_to_date", "sub_contract_start_date",
+    "sub_contract_end_date", "sub_woman_owned_business",
+    "sub_emerging_business", "document_code", "year", "contract_class",
 ]
 
 PENDING_COLUMNS = [
@@ -48,31 +63,106 @@ PENDING_COLUMNS = [
     "prime_mwbe_category", "woman_owned_business", "emerging_business",
     "contract_class",
 ]
- 
+
+REGISTERED_HEADER_MAP = {
+    "primecontractid": "prime_contract_id",
+    "contractincludessubvendors": "contract_includes_sub_vendors",
+    "primevendor": "prime_vendor",
+    "primevendormwbecategory": "prime_vendor_mwbe_category",
+    "primecontractpurpose": "prime_contract_purpose",
+    "primecontractoriginalamount": "prime_contract_original_amount",
+    "primecontractcurrentamount": "prime_contract_current_amount",
+    "primevendorspendtodate": "prime_vendor_spent_to_date",
+    "primecontractstartdate": "prime_contract_start_date",
+    "primecontractenddate": "prime_contract_end_date",
+    "primecontractregistrationdate": "prime_contract_registration_date",
+    "primecontractingagency": "prime_contracting_agency",
+    "primeocanumber": "prime_oca_number",
+    "primecontractversion": "prime_contract_version",
+    "parentcontractid": "parent_contract_id",
+    "primecontracttype": "prime_contract_type",
+    "primecontractawardmethod": "prime_contract_award_method",
+    "primecontractexpensecategory": "prime_contract_expense_category",
+    "primecontractindustry": "prime_contract_industry",
+    "primecontractpin": "prime_contract_pin",
+    "primewomanownedbusiness": "prime_woman_owned_business",
+    "primeemergingbusiness": "prime_emerging_business",
+    "subvendor": "sub_vendor",
+    "subcontractreferenceid": "sub_contract_reference_id",
+    "subvendormwbecategory": "sub_vendor_mwbe_category",
+    "subcontractpurpose": "sub_contract_purpose",
+    "subcontractstatus": "sub_contract_status",
+    "subcontractoriginalamount": "sub_contract_original_amount",
+    "subcontractcurrentamount": "sub_contract_current_amount",
+    "subvendorpaidtodate": "sub_vendor_paid_to_date",
+    "subcontractstartdate": "sub_contract_start_date",
+    "subcontractenddate": "sub_contract_end_date",
+    "subwomanownedbusiness": "sub_woman_owned_business",
+    "subemergingbusiness": "sub_emerging_business",
+    "documentcode": "document_code",
+    "year": "year",
+    "contractclass": "contract_class",
+}
+
+PENDING_HEADER_MAP = {
+    "agency": "agency",
+    "primevendor": "prime_vendor",
+    "contractid": "contract_id",
+    "purpose": "purpose",
+    "parentcontractid": "parent_contract_id",
+    "originalamount": "original_amount",
+    "currentamount": "current_amount",
+    "originalmodified": "original_modified",
+    "ocanumber": "oca_number",
+    "version": "version",
+    "receiveddate": "received_date",
+    "pin": "pin",
+    "contracttype": "contract_type",
+    "awardmethod": "award_method",
+    "startdate": "start_date",
+    "enddate": "end_date",
+    "industry": "industry",
+    "documentcode": "document_code",
+    "primemwbecategory": "prime_mwbe_category",
+    "womanownedbusiness": "woman_owned_business",
+    "emergingbusiness": "emerging_business",
+    "contractclass": "contract_class",
+}
+
+
+'''
+CSV layer
+'''
+
+def normalize_header(h: str) -> str:
+    #Lowercase and strip all non-alphanumeric chars
+    return re.sub(r"[^a-z0-9]", "", h.lower())
 
 
 
-def fetch_diit_contracts(records_from: int, max_records: int) -> str:
-    xml_body = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <request>
-        <type_of_data>Contracts</type_of_data>
-        <records_from>{records_from}</records_from>
-        <max_records>{max_records}</max_records>
-        <search_criteria>
-            <criteria>
-                <name>agency_code</name>
-                <type>value</type>
-                <value>{AGENCY_CODE}</value>
-            </criteria>
-            <criteria>
-                <name>budget_name</name>
-                <type>value</type>
-                <value>{BUDGET_CODE}</value>
-            </criteria>
-        </search_criteria>
-        <response_columns>
-            <column>contract_id</column>
-            <column>vendor_name</column>
-            <column>current_amount</column>
-        </response_columns>
-        
+'''
+Database layer
+'''
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+
+
+'''
+Main
+'''
+
+if __name__ = "__main__":
+    parser = argparse.Argumentparser(
+        description="Loading CheckBookNYC Data Feeds CSV export into SQLite and run DIIT contract analysis."
+    )
+    parser.add_argument ("--registered", help="Path to registered status data feeds CSV export.")
+    parser.add_argument ("--pending", help="Path to pending status data feeds CSV export.")
+    args = parser.parse_args()
+
+    if not args.registered and not args.pending"
+    parser.error("Provide at least one of --registered or --pending CSV file path.")
