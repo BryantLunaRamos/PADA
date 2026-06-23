@@ -4,6 +4,7 @@ Bryant Luna-Ramos
 
 
 """
+
 import argparse
 import csv
 import re
@@ -149,14 +150,258 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+def create_schema(conn: sqlite3.Connecton) -> None:
+    conn.executscript("""
+    DROP TABLE IF EXISTS contracts_registered;
+    DROP TABLE IF EXISTS contracts_pending;
+    DROP TABLE IF EXISTS contracts_unified;
+    DROP TABLE IF EXISTS vendor_summary;
+    
+    CREATE TABLE contracts_registered (
+        prime_contract_id               TEXT,
+        contract_includes_sub_vendor    TEXT, 
+        prime_vendor                    TEXT,
+        prime_vendor_mwbe_category      TEXT,
+        prime_contract_purpose          TEXT,
+        prime_contract_original_amount  REAL,
+        prime_contract_current_ammount  REAL,
+        prime_vedor_spent_to_date       REAL,
+        prime_contract_start_date       TEXT,
+        prime_contract_end_date         TEXT,
+        prime_contract_registration_date TEXT,
+        prime_contracting_agency        TEXT,
+        prime_oca_number                TEXT,
+        prime_contract_version          TEXT,
+        prime_contract_id               TEXT,
+        prime_contract_type             TEXT,
+        prime_contract_award_method     TEXT,
+        prime_contract_expense_category TEXT,
+        prime_contract_industry         TEXT,
+        prime_contract_pin              TEXT,
+        prime_woman_owned_business      TEXT,
+        prime_emerging_business         TEXT,
+        sub_vendor                      TEXT,
+        sub_contract_reference_id       TEXT,
+        sub_vendor_mwbe_category        TEXT,
+        sub_contract_original_amount    TEXT,
+        sub_contract_current_amount     TEXT,
+        sub_vendor_paid_to_date         TEXT,
+        sub_contract_start_date         TEXT,
+        sub_contract_end_date           TEXT,
+        sub_woman_owned_business        TEXT,
+        sub_emerging_business           TEXT,
+        document_code                   TEXT,
+        year                            TEXT,
+        contract_class                  TEXT,
+        is_diit                         INTEGER DEFAULT 0            
+    );
 
+    CREATE TABLE contracts_pending (
+        agency                          TEXT,
+        prime_vendor                    TEXT,
+        contract_id                     TEXT,
+        purpose                         TEXT,
+        parent_contract_id              TEXT,
+        original_amount                 REAL,
+        current_amount                  REAL,
+        original_modified               TEXT,
+        oca_number                      TEXT,
+        version                         TEXT,
+        received_date                   TEXT,
+        pin                             TEXT,
+        contract_type                   TEXT,
+        award_method                    TEXT,
+        start_date                      TEXT,
+        end_date                        TEXT,
+        industry                        TEXT,
+        document_code                   TEXT,
+        prime_mwbe_category             TEXT,
+        woman_owned_business            TEXT,
+        emerging_business               TEXT,
+        contract_class                  TEXT,
+        is_diit                         INTEGER DEFAULT 0
+    );
+                      
+    CREATE TABLE contracts_unified (
+        contract_id                     TEXT,
+        vendor_name                     TEXT,
+        vendor_role                     TEXT,   
+        mwbe_category                   TEXT,
+        purpose                         TEXT,
+        current_amount                  REAL,
+        original_amount                 REAL,
+        award_method                    TEXT,
+        contract_type                   TEXT,
+        start_date                      TEXT,
+        end_date                        TEXT,
+        status                          TEXT,   
+        is_diit                         INTEGER DEFAULT 0
+    );
+                      
+    CREATE TABLE vendor_summary (
+        vendor_name     TEXT PRIMARY KEY,
+        num_contracts   INTEGER,
+        total_amount    REAL,
+        mwbe_category   TEXT,
+        pct_of_total    REAL
+    );
+    """)
+    conn.commit()
+
+
+def parse_amount(val: str) -> float:
+    if not val:
+        return 0.0
+    val = val.replace(",", "").replace("$", "").strip()
+    if val in ("", "-"):
+        return 0.0
+    try:
+        return float(val)
+    except ValueError:
+        return 0.0
+
+def insert_pending(conn: sqlite3.Connection, rows: list) -> None:
+    if not rows:
+        return
+    cols = PENDING_COLUMNS
+    amount_cols = {c for c in cols if "amount" in c}
+    placeholders = ", ".join("?" for _ in cols)
+    sql = f"INSERT INTO contracts_pending ({', '.join(cols)}) VALUES ({placeholders})"
+
+    values = []
+    for r in rows:
+        row_vals = []
+        for c in cols:
+            v = r.get(c, "")
+            row_vals.append(parse_amount(v) if c in amount_cols else v)
+        values.append(tuple(row_vals))
+
+    conn.executemany(sql, values)
+    conn.commit()
+
+
+def flag_diit_sql(conn: sqlite3.Connection) -> None:
+    """Mark is_diit=1 on rows whose purpose text matches a DIIT keyword, then
+    un-flag rows matching a known false-positive exclude phrase. Pure SQL, no pandas."""
+    like_clauses_prime = " OR ".join(f"prime_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
+    like_clauses_sub   = " OR ".join(f"sub_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
+    conn.execute(f"""
+        UPDATE contracts_registered
+        SET is_diit = 1
+        WHERE {like_clauses_prime} OR {like_clauses_sub}
+    """)
+
+    like_clauses_pending = " OR ".join(f"purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
+    conn.execute(f"""
+        UPDATE contracts_pending
+        SET is_diit = 1
+        WHERE {like_clauses_pending}
+    """)
+    exclude_clauses_prime = " OR ".join(f"prime_contract_purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
+    exclude_clauses_sub   = " OR ".join(f"sub_contract_purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
+    conn.execute(f"""
+        UPDATE contracts_registered
+        SET is_diit = 0
+        WHERE is_diit = 1 AND ({exclude_clauses_prime} OR {exclude_clauses_sub})
+    """)
+
+    exclude_clauses_pending = " OR ".join(f"purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
+    conn.execute(f"""
+        UPDATE contracts_pending
+        SET is_diit = 0
+        WHERE is_diit = 1 AND ({exclude_clauses_pending})
+    """)
+    conn.commit()
+
+
+def build_unified_table(conn: sqlite3.Connection) -> None:
+    """
+    UNION registered (prime rows + sub rows, unpacked) and pending into one
+    normalized table. This is the core join/union step.
+    """
+    conn.execute("DELETE FROM contracts_unified")
+
+
+    conn.execute("""
+        INSERT INTO contracts_unified
+            (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
+            current_amount, original_amount, award_method, contract_type,
+            start_date, end_date, status, is_diit)
+        SELECT
+            prime_contract_id, prime_vendor, 'prime', prime_vendor_mwbe_category,
+            prime_contract_purpose, prime_contract_current_amount,
+            prime_contract_original_amount, prime_contract_award_method,
+            prime_contract_type, prime_contract_start_date, prime_contract_end_date,
+            'registered', is_diit
+        FROM contracts_registered
+        WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
+    """)
+
+    conn.execute("""
+        INSERT INTO contracts_unified
+            (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
+            current_amount, original_amount, award_method, contract_type,
+            start_date, end_date, status, is_diit)
+        SELECT
+            prime_contract_id, sub_vendor, 'sub', sub_vendor_mwbe_category,
+            sub_contract_purpose, sub_contract_current_amount,
+            sub_contract_original_amount, prime_contract_award_method,
+            prime_contract_type, sub_contract_start_date, sub_contract_end_date,
+            'registered', is_diit
+        FROM contracts_registered
+        WHERE sub_vendor IS NOT NULL AND sub_vendor != ''
+    """)
+
+    conn.execute("""
+        INSERT INTO contracts_unified
+            (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
+            current_amount, original_amount, award_method, contract_type,
+            start_date, end_date, status, is_diit)
+        SELECT
+            contract_id, prime_vendor, 'prime', prime_mwbe_category, purpose,
+            current_amount, original_amount, award_method, contract_type,
+            start_date, end_date, 'pending', is_diit
+        FROM contracts_pending
+        WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
+    """)
+    conn.commit()
+
+
+def build_vendor_summary_sql(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM vendor_summary")
+    conn.execute("""
+        INSERT INTO vendor_summary (vendor_name, num_contracts, total_amount, mwbe_category, pct_of_total)
+        SELECT
+            vendor_name,
+            COUNT(DISTINCT contract_id)                AS num_contracts,
+            SUM(current_amount)                        AS total_amount,
+            (SELECT mwbe_category FROM contracts_unified u2
+            WHERE u2.vendor_name = u1.vendor_name AND u2.is_diit = 1
+            GROUP BY mwbe_category ORDER BY COUNT(*) DESC LIMIT 1) AS mwbe_category,
+            0.0
+        FROM contracts_unified u1
+        WHERE is_diit = 1
+        GROUP BY vendor_name
+    """)
+    conn.commit()
+
+    total = conn.execute("SELECT SUM(total_amount) FROM vendor_summary").fetchone()[0] or 0
+    if total > 0:
+        conn.execute("UPDATE vendor_summary SET pct_of_total = ROUND(total_amount * 100.0 / ?, 2)", (total,))
+        conn.commit()
+
+
+def compute_hhi(conn: sqlite3.Connection) -> float:
+    """HHI = sum of squared market shares (0-100 scale)."""
+    rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
+    return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
 
 '''
 Main
 '''
 
-if __name__ = "__main__":
+if __name__ == "__main__":
     parser = argparse.Argumentparser(
         description="Loading CheckBookNYC Data Feeds CSV export into SQLite and run DIIT contract analysis."
     )
@@ -164,5 +409,5 @@ if __name__ = "__main__":
     parser.add_argument ("--pending", help="Path to pending status data feeds CSV export.")
     args = parser.parse_args()
 
-    if not args.registered and not args.pending"
-    parser.error("Provide at least one of --registered or --pending CSV file path.")
+    if not args.registered and not args.pending:
+        parser.error("Provide at least one of --registered or --pending CSV file path.")
