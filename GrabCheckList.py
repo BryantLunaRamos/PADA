@@ -281,8 +281,6 @@ def insert_pending(conn: sqlite3.Connection, rows: list) -> None:
 
 
 def flag_diit_sql(conn: sqlite3.Connection) -> None:
-    """Mark is_diit=1 on rows whose purpose text matches a DIIT keyword, then
-    un-flag rows matching a known false-positive exclude phrase. Pure SQL, no pandas."""
     like_clauses_prime = " OR ".join(f"prime_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
     like_clauses_sub   = " OR ".join(f"sub_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
     conn.execute(f"""
@@ -315,12 +313,7 @@ def flag_diit_sql(conn: sqlite3.Connection) -> None:
 
 
 def build_unified_table(conn: sqlite3.Connection) -> None:
-    """
-    UNION registered (prime rows + sub rows, unpacked) and pending into one
-    normalized table. This is the core join/union step.
-    """
     conn.execute("DELETE FROM contracts_unified")
-
 
     conn.execute("""
         INSERT INTO contracts_unified
