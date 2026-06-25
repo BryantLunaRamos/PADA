@@ -2,7 +2,8 @@
 Bryant Luna-Ramos
 6/16/26
 
-
+How to run:
+python diit_contracts_pull.py --registered registered.csv --pending pending.csv
 """
 
 import argparse
@@ -387,21 +388,6 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
             'registered', is_diit
         FROM contracts_registered
         WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
-    """)
-
-    conn.execute("""
-        INSERT INTO contracts_unified
-            (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
-            current_amount, original_amount, award_method, contract_type,
-            start_date, end_date, status, is_diit)
-        SELECT
-            prime_contract_id, sub_vendor, 'sub', sub_vendor_mwbe_category,
-            sub_contract_purpose, sub_contract_current_amount,
-            sub_contract_original_amount, prime_contract_award_method,
-            prime_contract_type, sub_contract_start_date, sub_contract_end_date,
-            'registered', is_diit
-        FROM contracts_registered
-        WHERE sub_vendor IS NOT NULL AND sub_vendor != ''
     """)
 
     conn.execute("""
