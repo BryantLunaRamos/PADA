@@ -131,9 +131,95 @@ PENDING_HEADER_MAP = {
     "contractclass": "contract_class",
 }
 
+PRINCIPALS_HEADER_MAP = {
+    "vendorname": "vendor_name",
+    "principalname": "principal_name",
+    "currenttitle": "current_title",
+    "principalownershiptype": "ownership_tye",
+}
+
+RELATED_ENTITIES_HEADER_MAP = {
+    "vendorname": "vendor_name",
+    "relatedentityname": "related_entity_name",
+    "addressline1": "address_line_1",
+    "addressline2": "address_line_2",
+    "city": "city",
+    "state": "state",
+    "zipcode": "zip_code",
+    "country": "country",
+    "telephone": "telephone",
+    "relationshiptovendor": "relationship_to_vendor",
+}
+
+OTHER_NAMES_HEADER_MAP = {
+    "vendorname": "vendor_name",
+    "othernametype": "other_name_type",
+    "othername": "other_name",
+    "fromdate": "from_date",
+    "todate": "to_date",
+}
+
+ENTITY_SUMMARY_HEADER_MAP = {
+    "vendorname": "vendor_name",
+    "relatedentityname": "related_entity_name",
+    "addressline1": "address_line_1",
+    "addressline2": "address_line_2",
+    "city": "city",
+    "state": "state",
+    "zipcode": "zip_code",
+    "country": "country",
+    "telephone": "telephone",
+    "stockexchangesymbol": "stock_exchange_symbol",
+    "forprofit": "for_profit",
+    "dunsnumber": "duns_number",
+    "grossrevenue": "gross_revenue",
+}
+
+TABLE_CONFIGS = {
+    "contracts_registered": {
+        "columns": REGISTERED_EXPENSE_COLUMNS,
+        "amount_cols": {c for c in REGISTERED_EXPENSE_COLUMNS
+                        if "amount" in c or "paid_to_date" in c or "spent_to_date" in c},
+        "header_map": REGISTERED_EXPENSE_COLUMNS,
+        "extra_columns": ["is_diit INTEGER DEFAULT 0"],
+    },
+    "pending_contracts": {
+        "columns": PENDING_COLUMNS,
+        "amount_cols": {c for c in PENDING_COLUMNS},
+        "header_map": PENDING_COLUMNS,
+        "extra_columns": {"is_diit INTEGERE DEFAULT 0"},
+    },
+    "passport_principals": {
+        "columns": ["vendor_name", "principal_name", "current_title", "ownership_type"],
+        "amount_cols": set(),
+        "header_map": PRINCIPALS_HEADER_MAP,
+        "extra_columns": [],
+    },
+    "passport_related_entities": {
+        "columns": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", 
+                                  "city", "state", "zip_code", "country", "telephone", "relationship_to_vendor"],
+        "amount_cols": set(),
+        "header_map": RELATED_ENTITIES_HEADER_MAP,
+        "extra_columns": [],
+    },
+    "passport_other_names": {
+        "columns": ["vendor_name", "other_name_type", "other_name", "from_date", "to_date"],
+        "amount_cols": set(),
+        "header_map": OTHER_NAMES_HEADER_MAP,
+        "extra_columns": [],
+    },
+    "passport_entity_summary": {
+        "coluns": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", "city", "state",
+                    "zip_code", "country", "telephone", "stock_exchange_symbol", "for_profit", "duns_number"
+                    "gross_revenue"],
+    }
+
+}
+
 '''
 CSV functions
 '''
+
 
 def normalize_header(h: str) -> str:
     #Lowercase and strip all non-alphanumeric chars
