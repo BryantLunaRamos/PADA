@@ -277,7 +277,7 @@ def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: in
     
     if header_row_idx is None:
         print(f"[{label}] WARNING: could not locate a header row in the first "
-                f"{max_search_rows} rows — check the file format.")
+                f"{max_search_rows} rows, check the file format.")
         wb.close()
         return []
     
@@ -289,7 +289,7 @@ def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: in
 
     missing = [internal for internal in header_map.values() if internal not in col_index.values()]
     if missing:
-        print(f"[{label}] WARNING: expected column(s) NOT FOUND — those fields will be blank: {missing}")
+        print(f"[{label}] WARNING: expected column(s) NOT FOUND. Those fields will be blank: {missing}")
 
     rows = []
     for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
