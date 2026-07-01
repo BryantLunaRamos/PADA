@@ -9,6 +9,7 @@ python diit_contracts_pull.py --registered registered.csv --pending pending.csv
 import argparse
 import csv
 import re
+import openpyxl
 import sqlite3
 
 DB_PATH = "diit_contracts.db"
@@ -209,11 +210,13 @@ TABLE_CONFIGS = {
         "extra_columns": [],
     },
     "passport_entity_summary": {
-        "coluns": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", "city", "state",
+        "colums": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", "city", "state",
                     "zip_code", "country", "telephone", "stock_exchange_symbol", "for_profit", "duns_number"
                     "gross_revenue"],
-    }
-
+        "amount_col": set(),
+        "header_map": ENTITY_SUMMARY_HEADER_MAP,
+        "extra_columns": [],
+    },
 }
 
 '''
@@ -247,7 +250,7 @@ def load_csv_rows(path: str, header_map: dict, label: str) -> list:
             print(f"[{label}] NOTE: {len(unmapped)} CSV column(s) present but not used "
                   f"downstream (fine to ignore): {unmapped}")
         if missing:
-            print(f"[{label}] WARNING: expected column(s) NOT FOUND in this CSV — "
+            print(f"[{label}] WARNING: expected column(s) NOT FOUND in this CSV. "
                   f"those fields will be blank: {missing}")
 
         for raw_row in reader:
@@ -258,11 +261,47 @@ def load_csv_rows(path: str, header_map: dict, label: str) -> list:
     print(f"[{label}] Loaded {len(rows)} rows from {path}")
     return rows
 
-def load_registered_csv(path: str) -> list:
-    return load_csv_rows(path, REGISTERED_HEADER_MAP, "registered")
+def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: int = 20) -> list:
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
 
-def load_pending_csv(path: str) -> list:
-    return load_csv_rows(path, PENDING_HEADER_MAP, "pending")
+    header_row_idx = None
+    raw_to_internal = {}
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_search_rows, values_only=True)):
+        norm_cells = {normalize_header(str(v)): v for v in row if v}
+        matches = {norm: header_map[norm] for norm in norm_cells if norm in header_map}
+        if len(matches) >= max(2, len(header_map) // 2):
+            header_row_idx = i + 1
+            raw_to_internal = {norm_cells[norm]: internal for norm, internal in matches.items()}
+            break
+    
+    if header_row_idx is None:
+        print(f"[{label}] WARNING: could not locate a header row in the first "
+                f"{max_search_rows} rows — check the file format.")
+        wb.close()
+        return []
+    
+    col_index = {}
+    for row in ws.iter_rows(min_row=header_row_idx, max_row=header_row_idx, values_only=True):
+        for j, val in enumerate(row):
+            if val in raw_to_internal:
+                col_index[j] = raw_to_internal[val]
+
+    missing = [internal for internal in header_map.values() if internal not in col_index.values()]
+    if missing:
+        print(f"[{label}] WARNING: expected column(s) NOT FOUND — those fields will be blank: {missing}")
+
+    rows = []
+    for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+        if row is None or all(v is None for v in row):
+            continue
+        record = {internal: str(row[j]).strip() if row[j] is not None else ""
+                  for j, internal in col_index.items()}
+        rows.append(record)
+
+    wb.close()
+    print(f"[{label}] Loaded {len(rows)} rows from {path}")
+    return rows
 
 '''
 Database layer
