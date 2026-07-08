@@ -9,8 +9,8 @@ python diit_contracts_pull.py --registered registered.csv --pending pending.csv
 import argparse
 import csv
 import re
-import openpyxl
 import sqlite3
+import openpyxl
 
 DB_PATH = "diit_contracts.db"
 
@@ -132,11 +132,13 @@ PENDING_HEADER_MAP = {
     "contractclass": "contract_class",
 }
 
+# PASSPORT HEADER MAPS
+
 PRINCIPALS_HEADER_MAP = {
     "vendorname": "vendor_name",
     "principalname": "principal_name",
     "currenttitle": "current_title",
-    "principalownershiptype": "ownership_tye",
+    "principalownershiptype": "ownership_type",
 }
 
 RELATED_ENTITIES_HEADER_MAP = {
@@ -162,7 +164,6 @@ OTHER_NAMES_HEADER_MAP = {
 
 ENTITY_SUMMARY_HEADER_MAP = {
     "vendorname": "vendor_name",
-    "relatedentityname": "related_entity_name",
     "addressline1": "address_line_1",
     "addressline2": "address_line_2",
     "city": "city",
@@ -176,19 +177,21 @@ ENTITY_SUMMARY_HEADER_MAP = {
     "grossrevenue": "gross_revenue",
 }
 
+# table configs
+
 TABLE_CONFIGS = {
     "contracts_registered": {
         "columns": REGISTERED_EXPENSE_COLUMNS,
         "amount_cols": {c for c in REGISTERED_EXPENSE_COLUMNS
-                        if "amount" in c or "paid_to_date" in c or "spent_to_date" in c},
-        "header_map": REGISTERED_EXPENSE_COLUMNS,
+                         if "amount" in c or "paid_to_date" in c or "spent_to_date" in c},
+        "header_map": REGISTERED_HEADER_MAP,
         "extra_columns": ["is_diit INTEGER DEFAULT 0"],
     },
-    "pending_contracts": {
+    "contracts_pending": {
         "columns": PENDING_COLUMNS,
-        "amount_cols": {c for c in PENDING_COLUMNS},
-        "header_map": PENDING_COLUMNS,
-        "extra_columns": {"is_diit INTEGERE DEFAULT 0"},
+        "amount_cols": {c for c in PENDING_COLUMNS if "amount" in c},
+        "header_map": PENDING_HEADER_MAP,
+        "extra_columns": ["is_diit INTEGER DEFAULT 0"],
     },
     "passport_principals": {
         "columns": ["vendor_name", "principal_name", "current_title", "ownership_type"],
@@ -197,8 +200,8 @@ TABLE_CONFIGS = {
         "extra_columns": [],
     },
     "passport_related_entities": {
-        "columns": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", 
-                                  "city", "state", "zip_code", "country", "telephone", "relationship_to_vendor"],
+        "columns": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2",
+                    "city", "state", "zip_code", "country", "telephone", "relationship_to_vendor"],
         "amount_cols": set(),
         "header_map": RELATED_ENTITIES_HEADER_MAP,
         "extra_columns": [],
@@ -210,19 +213,19 @@ TABLE_CONFIGS = {
         "extra_columns": [],
     },
     "passport_entity_summary": {
-        "colums": ["vendor_name", "related_entity_name", "address_line_1", "address_line_2", "city", "state",
-                    "zip_code", "country", "telephone", "stock_exchange_symbol", "for_profit", "duns_number"
-                    "gross_revenue"],
-        "amount_col": set(),
+        "columns": ["vendor_name", "address_line_1", "address_line_2", "city", "state",
+                    "zip_code", "country", "telephone", "stock_exchange_symbol",
+                    "for_profit", "duns_number", "gross_revenue"],
+        "amount_cols": set(),
         "header_map": ENTITY_SUMMARY_HEADER_MAP,
         "extra_columns": [],
     },
 }
 
+
 '''
 CSV functions
 '''
-
 
 def normalize_header(h: str) -> str:
     #Lowercase and strip all non-alphanumeric chars
@@ -250,7 +253,7 @@ def load_csv_rows(path: str, header_map: dict, label: str) -> list:
             print(f"[{label}] NOTE: {len(unmapped)} CSV column(s) present but not used "
                   f"downstream (fine to ignore): {unmapped}")
         if missing:
-            print(f"[{label}] WARNING: expected column(s) NOT FOUND in this CSV. "
+            print(f"[{label}] WARNING: expected column(s) NOT FOUND in this CSV file"
                   f"those fields will be blank: {missing}")
 
         for raw_row in reader:
@@ -274,13 +277,13 @@ def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: in
             header_row_idx = i + 1
             raw_to_internal = {norm_cells[norm]: internal for norm, internal in matches.items()}
             break
-    
+
     if header_row_idx is None:
         print(f"[{label}] WARNING: could not locate a header row in the first "
-                f"{max_search_rows} rows, check the file format.")
+              f"{max_search_rows} rows, check the file format.")
         wb.close()
         return []
-    
+
     col_index = {}
     for row in ws.iter_rows(min_row=header_row_idx, max_row=header_row_idx, values_only=True):
         for j, val in enumerate(row):
@@ -289,7 +292,7 @@ def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: in
 
     missing = [internal for internal in header_map.values() if internal not in col_index.values()]
     if missing:
-        print(f"[{label}] WARNING: expected column(s) NOT FOUND. Those fields will be blank: {missing}")
+        print(f"[{label}] WARNING: expected column(s) NOT FOUND, following fields will be blank: {missing}")
 
     rows = []
     for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
@@ -303,6 +306,16 @@ def load_excel_rows(path: str, header_map: dict, label: str, max_search_rows: in
     print(f"[{label}] Loaded {len(rows)} rows from {path}")
     return rows
 
+
+def load_table(path: str, table_name: str, label: str = None) -> list:
+    # Single entry point for all source files Pulls the header map from TABLE_CONFIGS[table_name]
+    cfg = TABLE_CONFIGS[table_name]
+    label = label or table_name
+    if path.lower().endswith(".xlsx"):
+        return load_excel_rows(path, cfg["header_map"], label)
+    return load_csv_rows(path, cfg["header_map"], label)
+
+
 '''
 Database layer
 '''
@@ -312,84 +325,28 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+def create_table_generic(conn: sqlite3.Connection, table_name: str, columns: list, extra_columns: list) -> None:
+    col_defs = ",\n        ".join(f"{c} TEXT" for c in columns)
+    extra_defs = (",\n        " + ",\n        ".join(extra_columns)) if extra_columns else ""
+    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+    conn.execute(f"""
+        CREATE TABLE {table_name} (
+        {col_defs}{extra_defs}
+        )
+    """)
+
 def create_schema(conn: sqlite3.Connection) -> None:
+    for table_name, cfg in TABLE_CONFIGS.items():
+        create_table_generic(conn, table_name, cfg["columns"], cfg["extra_columns"])
+
     conn.executescript("""
-    DROP TABLE IF EXISTS contracts_registered;
-    DROP TABLE IF EXISTS contracts_pending;
     DROP TABLE IF EXISTS contracts_unified;
     DROP TABLE IF EXISTS vendor_summary;
-    
-    CREATE TABLE contracts_registered (
-        prime_contract_id               TEXT,
-        contract_includes_sub_vendors   TEXT,
-        prime_vendor                    TEXT,
-        prime_vendor_mwbe_category      TEXT,
-        prime_contract_purpose          TEXT,
-        prime_contract_original_amount  REAL,
-        prime_contract_current_amount   REAL,
-        prime_vendor_spent_to_date      REAL,
-        prime_contract_start_date       TEXT,
-        prime_contract_end_date         TEXT,
-        prime_contract_registration_date TEXT,
-        prime_contracting_agency        TEXT,
-        prime_oca_number                TEXT,
-        prime_contract_version          TEXT,
-        parent_contract_id              TEXT,
-        prime_contract_type             TEXT,
-        prime_contract_award_method     TEXT,
-        prime_contract_expense_category TEXT,
-        prime_contract_industry         TEXT,
-        prime_contract_pin              TEXT,
-        prime_woman_owned_business      TEXT,
-        prime_emerging_business         TEXT,
-        sub_vendor                      TEXT,
-        sub_contract_reference_id       TEXT,
-        sub_vendor_mwbe_category        TEXT,
-        sub_contract_purpose            TEXT,
-        sub_contract_status             TEXT,
-        sub_contract_original_amount    TEXT,
-        sub_contract_current_amount     TEXT,
-        sub_vendor_paid_to_date         TEXT,
-        sub_contract_start_date         TEXT,
-        sub_contract_end_date           TEXT,
-        sub_woman_owned_business        TEXT,
-        sub_emerging_business           TEXT,
-        document_code                   TEXT,
-        year                            TEXT,
-        contract_class                  TEXT,
-        is_diit                         INTEGER DEFAULT 0            
-    );
 
-    CREATE TABLE contracts_pending (
-        agency                          TEXT,
-        prime_vendor                    TEXT,
-        contract_id                     TEXT,
-        purpose                         TEXT,
-        parent_contract_id              TEXT,
-        original_amount                 REAL,
-        current_amount                  REAL,
-        original_modified               TEXT,
-        oca_number                      TEXT,
-        version                         TEXT,
-        received_date                   TEXT,
-        pin                             TEXT,
-        contract_type                   TEXT,
-        award_method                    TEXT,
-        start_date                      TEXT,
-        end_date                        TEXT,
-        industry                        TEXT,
-        document_code                   TEXT,
-        prime_mwbe_category             TEXT,
-        woman_owned_business            TEXT,
-        emerging_business               TEXT,
-        contract_class                  TEXT,
-        is_diit                         INTEGER DEFAULT 0
-    );
-                      
     CREATE TABLE contracts_unified (
         contract_id                     TEXT,
         vendor_name                     TEXT,
-        vendor_role                     TEXT,   
+        vendor_role                     TEXT,
         mwbe_category                   TEXT,
         purpose                         TEXT,
         current_amount                  REAL,
@@ -398,10 +355,10 @@ def create_schema(conn: sqlite3.Connection) -> None:
         contract_type                   TEXT,
         start_date                      TEXT,
         end_date                        TEXT,
-        status                          TEXT,   
+        status                          TEXT,
         is_diit                         INTEGER DEFAULT 0
     );
-                      
+
     CREATE TABLE vendor_summary (
         vendor_name     TEXT PRIMARY KEY,
         num_contracts   INTEGER,
@@ -424,33 +381,14 @@ def parse_amount(val: str) -> float:
     except ValueError:
         return 0.0
 
-def insert_registered(conn: sqlite3.Connection, rows: list) -> None:
+def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
     if not rows:
         return
-    cols = REGISTERED_EXPENSE_COLUMNS
-    amount_cols = {c for c in cols if "amount" in c or "paid_to_date" in c or "spent_to_date" in c}
+    cfg = TABLE_CONFIGS[table_name]
+    cols = cfg["columns"]
+    amount_cols = cfg["amount_cols"]
     placeholders = ", ".join("?" for _ in cols)
-    sql = f"INSERT INTO contracts_registered ({', '.join(cols)}) VALUES ({placeholders})"
-
-    values = []
-    for r in rows:
-        row_vals = []
-        for c in cols:
-            v = r.get(c, "")
-            row_vals.append(parse_amount(v) if c in amount_cols else v)
-        values.append(tuple(row_vals))
-
-    conn.executemany(sql, values)
-    conn.commit()
-
-
-def insert_pending(conn: sqlite3.Connection, rows: list) -> None:
-    if not rows:
-        return
-    cols = PENDING_COLUMNS
-    amount_cols = {c for c in cols if "amount" in c}
-    placeholders = ", ".join("?" for _ in cols)
-    sql = f"INSERT INTO contracts_pending ({', '.join(cols)}) VALUES ({placeholders})"
+    sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
 
     values = []
     for r in rows:
@@ -515,6 +453,9 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
         WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
     """)
 
+    # Sub-vendor INSERT removed, didn't consider '-' character for null
+    # for empty sub fields, not '' or NULL, so the prior WHERE clause leaked
+
     conn.execute("""
         INSERT INTO contracts_unified
             (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
@@ -554,7 +495,6 @@ def build_vendor_summary_sql(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 def compute_hhi(conn: sqlite3.Connection) -> float:
-    """HHI = sum of squared market shares (0-100 scale)."""
     rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
@@ -564,10 +504,14 @@ Main
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Loading CheckBookNYC Data Feeds CSV export into SQLite and run DIIT contract analysis."
+        description="Loading CheckBookNYC and PASSPort exports into SQLite and run DIIT contract analysis."
     )
-    parser.add_argument ("--registered", help="Path to registered status data feeds CSV export.")
-    parser.add_argument ("--pending", help="Path to pending status data feeds CSV export.")
+    parser.add_argument("--registered", help="Path to registered status data feeds CSV export.")
+    parser.add_argument("--pending", help="Path to pending status data feeds CSV export.")
+    parser.add_argument("--principals", help="Path to PASSPort Principals Report (.xlsx).")
+    parser.add_argument("--related-entities", help="Path to PASSPort Related Entities Report (.xlsx).")
+    parser.add_argument("--other-names", help="Path to PASSPort Other Names Report (.xlsx).")
+    parser.add_argument("--entity-summary", help="Path to PASSPort Entity Summary Report (.xlsx).")
     args = parser.parse_args()
 
     if not args.registered and not args.pending:
@@ -576,9 +520,9 @@ if __name__ == "__main__":
     conn = get_connection()
     create_schema(conn)
 
-    #Load CSV exports
-    registered_rows = load_registered_csv(args.registered) if args.registered else []
-    pending_rows    = load_pending_csv(args.pending) if args.pending else []
+    # Load CSV exports
+    registered_rows = load_table(args.registered, "contracts_registered", "registered") if args.registered else []
+    pending_rows    = load_table(args.pending, "contracts_pending", "pending") if args.pending else []
 
     if not registered_rows and not pending_rows:
         print("\nNo rows loaded from either CSV. Check the file path(s) and that the "
@@ -586,21 +530,31 @@ if __name__ == "__main__":
         conn.close()
         raise SystemExit(1)
 
-    #Load into SQLite
-    insert_registered(conn, registered_rows)
-    insert_pending(conn, pending_rows)
+    # Load into SQLite, same generic insert_rows() call for every table
+    insert_rows(conn, "contracts_registered", registered_rows)
+    insert_rows(conn, "contracts_pending", pending_rows)
     print(f"\nLoaded {len(registered_rows)} registered rows and {len(pending_rows)} pending rows into {DB_PATH}")
 
-    #Flag DIIT contracts
+    # Load PASSPort ownership data, if provided (optional fyi, pipeline still runs checkbook only without these)
+    for table_name, arg_val in [
+        ("passport_principals",      args.principals),
+        ("passport_related_entities", args.related_entities),
+        ("passport_other_names",      args.other_names),
+        ("passport_entity_summary",   args.entity_summary),
+    ]:
+        if arg_val:
+            insert_rows(conn, table_name, load_table(arg_val, table_name))
+
+    # Flag DIIT contracts
     flag_diit_sql(conn)
 
-    #Union registered and pending into one normalized table
+    # Union registered and pending into one normalized table
     build_unified_table(conn)
 
     diit_count = conn.execute("SELECT COUNT(*) FROM contracts_unified WHERE is_diit = 1").fetchone()[0]
     print(f"Flagged {diit_count} unified rows as likely DIIT/tech contracts.")
 
-    #Vendor summary and execute HHI
+    # Vendor summary and execute HHI
     build_vendor_summary_sql(conn)
     hhi = compute_hhi(conn)
 
@@ -629,6 +583,21 @@ if __name__ == "__main__":
     """).fetchall()
     for cat, cnt in mwbe_counts:
         print(f"  {cat or '(blank)':<20} {cnt}")
+
+    if args.principals or args.related_entities:
+        print("\n--- PASSPort ownership data loaded ---")
+        if args.principals:
+            n = conn.execute("SELECT COUNT(*) FROM passport_principals").fetchone()[0]
+            print(f"  passport_principals: {n:,} rows")
+        if args.related_entities:
+            n = conn.execute("SELECT COUNT(*) FROM passport_related_entities").fetchone()[0]
+            print(f"  passport_related_entities: {n:,} rows")
+        if args.other_names:
+            n = conn.execute("SELECT COUNT(*) FROM passport_other_names").fetchone()[0]
+            print(f"  passport_other_names: {n:,} rows")
+        if args.entity_summary:
+            n = conn.execute("SELECT COUNT(*) FROM passport_entity_summary").fetchone()[0]
+            print(f"  passport_entity_summary: {n:,} rows")
 
     conn.close()
     print(f"\nDone. Full database saved at: {DB_PATH}")
