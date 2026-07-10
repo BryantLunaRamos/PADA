@@ -3,12 +3,14 @@ Bryant Luna-Ramos
 6/16/26
 
 How to run:
+
     python diit_contracts_pull.py --registered registered.csv --pending pending.csv
+
     python diit_contracts_pull.py --registered registered.csv --pending pending.csv \
-        --sources complete_entity_principal_websites.xlsx \
-                  complete_entity_relatedentities_website.xlsx \
-                  complete_entity_othernames_website.xlsx \
-                  complete_entity_summary_website.xlsx \
+            --principals complete_entity_principal_websites.xlsx \
+            --related-entities complete_entity_relatedentities_website.xlsx \
+            --other-names complete_entity_othernames_website.xlsx \
+            --entity-summary complete_entity_summary_website.xlsx
 """
 
 import argparse
@@ -41,18 +43,24 @@ DIIT_EXCLUDE_PHRASES = [
     "vendor does not have order in system", "doc posted in city",
 ]
 
-# Extra columns appended to Checkbook tables beyond what the source file provides
-# All other tables (PASSPort and any future source) get no extra columns by default
+# Extra column definitions appended beyond whatever the source file provides
 TABLE_CONFIGS = {
-    "contracts_registered": ["is_diit INTEGER DEFAULT 0"],
-    "contracts_pending":    ["is_diit INTEGER DEFAULT 0"],
+    "contracts_registered":      ["is_diit INTEGER DEFAULT 0"],
+    "contracts_pending":         ["is_diit INTEGER DEFAULT 0"],
+    "passport_principals":       [],
+    "passport_related_entities": [],
+    "passport_other_names":      [],
+    "passport_entity_summary":   [],
 }
 
+
 '''
-Header normalization
+Header Normalization
 '''
+
+
 def header_to_snake(h: str) -> str:
-    # Strip all non-alphanumeric chars (M/WBE >> MWBE, % >> gone), then snake_case
+    # Strip all non-alphanumeric chars (e.g. M/WBE into MWBE,), then snake_case
     clean = re.sub(r'[^a-zA-Z0-9 ]', '', h)
     return '_'.join(p.lower() for p in clean.split())
 
@@ -60,8 +68,7 @@ def is_amount_col(col: str) -> bool:
     return "amount" in col or "paid_to_date" in col or "spend_to_date" in col or "spent_to_date" in col
 
 
-
-''' 
+'''
 Loaders, both return (rows: list[dict], cols: list[str])
 '''
 
@@ -70,9 +77,9 @@ def load_csv_rows(path: str, label: str) -> tuple:
     rows = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        snake = {h: header_to_snake(h) for h in (reader.fieldnames or []) if h is not None}
+        snake = {h: header_to_snake(h) for h in (reader.fieldnames or [])}
         for raw in reader:
-            rows.append({snake[k]: (v or "").strip() for k, v in raw.items() if k in snake})
+            rows.append({snake[k]: (v or "").strip() for k, v in raw.items()})
     print(f"[{label}] Loaded {len(rows)} rows from {path}")
     return rows, list(snake.values())
 
@@ -93,7 +100,7 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
         wb.close()
         return [], []
 
-    # Map column index >> snake name
+    # Map column index into snake name
     col_positions = {j: header_to_snake(str(v)) for j, v in enumerate(best_row) if v is not None}
 
     rows = []
@@ -128,6 +135,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def create_raw_table(conn: sqlite3.Connection, table_name: str, cols: list) -> None:
+    # Build schema dynamically from actual file columns; amount cols typed REAL
     extra = TABLE_CONFIGS.get(table_name, [])
     col_defs = ",\n        ".join(f"{c} REAL" if is_amount_col(c) else f"{c} TEXT" for c in cols)
     extra_defs = (",\n        " + ",\n        ".join(extra)) if extra else ""
@@ -136,6 +144,7 @@ def create_raw_table(conn: sqlite3.Connection, table_name: str, cols: list) -> N
 
 
 def create_derived_tables(conn: sqlite3.Connection) -> None:
+    # Fixed schema analysis tables, previous were superfluous
     conn.executescript("""
     DROP TABLE IF EXISTS contracts_unified;
     DROP TABLE IF EXISTS vendor_summary;
@@ -182,7 +191,7 @@ def parse_amount(val: str) -> float:
 def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
     if not rows:
         return
-    # Column order comes from the row dicts themselves, no separate column list needed
+    # Column order comes from the row dicts themselves
     cols = list(rows[0].keys())
     placeholders = ", ".join("?" for _ in cols)
     sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
@@ -195,7 +204,7 @@ def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
 
 
 '''
-DIIT flagging, two-pass SQL on raw tables
+DIIT flagging, two pass run on raw SQL tables
 '''
 
 
@@ -218,7 +227,7 @@ def flag_diit_sql(conn: sqlite3.Connection, loaded: set) -> None:
 
 
 '''
- Analysis, unified table, vendor summary, HHI
+Analysis unified table, vendor summary, HHI
 '''
 
 def build_unified_table(conn: sqlite3.Connection) -> None:
@@ -239,7 +248,7 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
         WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
     """)
 
-    #Sub-vendor INSERT removed: '-' placeholder leaked 40k phantom $0 rows
+    # Sub-vendor INSERT removed: '-' placeholder leaked 40k phantom $0 rows
 
     conn.execute("""
         INSERT INTO contracts_unified
@@ -280,25 +289,25 @@ def build_vendor_summary_sql(conn: sqlite3.Connection) -> None:
 
 
 def compute_hhi(conn: sqlite3.Connection) -> float:
-    # HHI = sum of squared market shares (0-10000 scale)
     rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
 
-
-''' 
-Mains
+'''
+Main
 '''
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Checkbook NYC + PASSPort exports >> SQLite >> DIIT contract analysis."
+        description="Checkbook NYC + PASSPort exports to SQLite to DIIT contract analysis."
     )
     parser.add_argument("--registered",      help="Checkbook registered contracts CSV")
     parser.add_argument("--pending",         help="Checkbook pending contracts CSV")
-    parser.add_argument("--sources", nargs="+", metavar="FILE",
-                        help="Any additional source files (CSV or XLSX). Table name derived from filename.")
+    parser.add_argument("--principals",      help="PASSPort Principals Report (.xlsx)")
+    parser.add_argument("--related-entities",help="PASSPort Related Entities Report (.xlsx)")
+    parser.add_argument("--other-names",     help="PASSPort Other Names Report (.xlsx)")
+    parser.add_argument("--entity-summary",  help="PASSPort Entity Summary Report (.xlsx)")
     args = parser.parse_args()
 
     if not args.registered and not args.pending:
@@ -308,21 +317,20 @@ if __name__ == "__main__":
     create_derived_tables(conn)
 
     # Load each file, build its table dynamically from actual columns, then insert
-    # Build source list: fixed Checkbook files + arbitrary extra sources
-    import os
-    sources = []
-    if args.registered:
-        sources.append(("contracts_registered", args.registered, "registered"))
-    if args.pending:
-        sources.append(("contracts_pending", args.pending, "pending"))
-    for path in (args.sources or []):
-        # Table name comes from filename
-        stem = os.path.splitext(os.path.basename(path))[0]
-        table_name = header_to_snake(stem)
-        sources.append((table_name, path, table_name))
+    sources = [
+        ("contracts_registered",      args.registered),
+        ("contracts_pending",          args.pending),
+        ("passport_principals",        args.principals),
+        ("passport_related_entities",  args.related_entities),
+        ("passport_other_names",       args.other_names),
+        ("passport_entity_summary",    args.entity_summary),
+    ]
 
     loaded = set()
-    for table_name, path, label in sources:
+    for table_name, path in sources:
+        if not path:
+            continue
+        label = table_name.replace("contracts_", "").replace("passport_", "")
         rows, cols = load_table(path, table_name, label)
         create_raw_table(conn, table_name, cols)
         insert_rows(conn, table_name, rows)
@@ -359,10 +367,10 @@ if __name__ == "__main__":
     """).fetchall():
         print(f"  {cat or '(blank)':<22} {cnt}")
 
-    extra_loaded = [t for t in loaded if t not in ("contracts_registered", "contracts_pending")]
-    if extra_loaded:
-        print("\n--- Additional source tables loaded ---")
-        for t in extra_loaded:
+    passport_loaded = [t for t in loaded if t.startswith("passport_")]
+    if passport_loaded:
+        print("\n--- PASSPort tables loaded ---")
+        for t in passport_loaded:
             n = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
             print(f"  {t}: {n:,} rows")
 
