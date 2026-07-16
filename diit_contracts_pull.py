@@ -18,6 +18,9 @@ import re
 import sqlite3
 from difflib import SequenceMatcher
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import openpyxl
 
 DB_PATH = "diit_contracts.db"
@@ -44,7 +47,6 @@ DIIT_EXCLUDE_PHRASES = [
     "vendor does not have order in system", "doc posted in city",
 ]
 
-# Extra columns appended to Checkbook tables beyond what the source file provides
 TABLE_CONFIGS = {
     "contracts_registered": ["is_diit INTEGER DEFAULT 0"],
     "contracts_pending":    ["is_diit INTEGER DEFAULT 0"],
@@ -90,7 +92,6 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
 
-    # Find header row as the one with the most non null string cells
     best_idx, best_row, best_count = None, None, 0
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_search, values_only=True)):
         n_strings = sum(1 for v in row if isinstance(v, str) and v.strip())
@@ -102,7 +103,6 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
         wb.close()
         return [], []
 
-    # Map column index >> snake name
     col_positions = {j: header_to_snake(str(v)) for j, v in enumerate(best_row) if v is not None}
 
     rows = []
@@ -119,7 +119,6 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
 
 
 def load_table(path: str, table_name: str, label: str = None) -> tuple:
-    # Single entry point, dispatches to CSV or Excel loader by extension
     label = label or table_name
     if path.lower().endswith(".xlsx"):
         return load_excel_rows(path, label)
@@ -238,6 +237,7 @@ def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
     conn.executemany(sql, values)
     conn.commit()
 
+
 '''
 DIIT flagging, two-pass SQL on raw tables
 '''
@@ -258,6 +258,7 @@ def flag_diit_sql(conn: sqlite3.Connection, loaded: set) -> None:
         conn.execute(f"UPDATE contracts_pending SET is_diit=0 WHERE is_diit=1 AND ({excl_pend})")
 
     conn.commit()
+
 
 '''
 Analysis, unified table, vendor summary, HHI
@@ -290,7 +291,6 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
         GROUP BY prime_contract_id
     """)
 
-    #Sub-vendor INSERT removed: '-' placeholder leaked 40k phantom $0 rows
     conn.execute("""
         INSERT INTO contracts_unified
             (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
@@ -330,6 +330,7 @@ def build_vendor_summary_sql(conn: sqlite3.Connection) -> None:
 
 
 def compute_hhi(conn: sqlite3.Connection) -> float:
+    # HHI = sum of squared market shares (0-10000 scale)
     rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
@@ -536,7 +537,34 @@ def compute_cluster_hhi(conn):
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
 
-def run_ownership_clustering(conn):
+def build_market_share_chart(conn, output_path, top_n=10):
+    rows = conn.execute(
+        "SELECT cluster_id, total_amount, pct_of_total FROM cluster_summary ORDER BY total_amount DESC"
+    ).fetchall()
+    total = sum(r[1] for r in rows)
+    top_rows = rows[:top_n]
+    other_pct = 100 * (total - sum(r[1] for r in top_rows)) / total if total else 0
+    other_n = len(rows) - len(top_rows)
+
+    labels = [r[0][:35] for r in top_rows] + [f"All others ({other_n} vendors)"]
+    pcts = [r[2] for r in top_rows] + [other_pct]
+    colors = ["#2a78d6"] * len(top_rows) + ["#c3c2b7"]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    y_pos = range(len(labels))
+    ax.barh(y_pos, pcts, color=colors)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("% of total DIIT contract dollars")
+    ax.set_title("Share of DIIT contract dollars by vendor/ownership cluster")
+    ax.grid(axis="x", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def run_ownership_clustering(conn, figures_dir="."):
     create_ownership_tables(conn)
 
     links = link_checkbook_to_passport(conn)
@@ -600,6 +628,10 @@ def run_ownership_clustering(conn):
             line1 = key.split("|")[0]
             print(f"  {line1}: {', '.join(sorted(vendors))}")
 
+    chart_path = f"{figures_dir}/market_share_by_vendor.png"
+    build_market_share_chart(conn, chart_path)
+    print(f"\nSaved chart: {chart_path}")
+
 
 '''
 Main
@@ -614,6 +646,7 @@ if __name__ == "__main__":
     parser.add_argument("--sources", nargs="+", metavar="FILE",
                         help="Any additional source files (CSV or XLSX). Table name derived from filename.")
     parser.add_argument("--db", default=DB_PATH, help="Output SQLite database path")
+    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
     args = parser.parse_args()
 
     if not args.registered and not args.pending:
@@ -623,14 +656,12 @@ if __name__ == "__main__":
     conn.execute("PRAGMA foreign_keys = ON")
     create_derived_tables(conn)
 
-    # Load each file, build its table dynamically from actual columns, then insert
     sources = []
     if args.registered:
         sources.append(("contracts_registered", args.registered, "registered"))
     if args.pending:
         sources.append(("contracts_pending", args.pending, "pending"))
     for path in (args.sources or []):
-        # Table name comes from filename
         stem = os.path.splitext(os.path.basename(path))[0]
         table_name = header_to_snake(stem)
         sources.append((table_name, path, table_name))
@@ -682,7 +713,7 @@ if __name__ == "__main__":
 
     has_passport_data = any(t == "completeentityprincipalwebsites" for t in loaded)
     if has_passport_data:
-        run_ownership_clustering(conn)
+        run_ownership_clustering(conn, figures_dir=args.figures_dir)
     else:
         print("\nNo completeentityprincipalwebsites source loaded - skipping ownership clustering.")
 

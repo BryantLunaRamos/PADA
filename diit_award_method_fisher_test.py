@@ -1,6 +1,9 @@
 import argparse
 import sqlite3
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from scipy.stats import fisher_exact
 
 DB_PATH = "diit_contracts.db"
@@ -15,7 +18,7 @@ COMPETITIVE_METHODS = {
 NON_COMPETITIVE_METHODS = {
     "M/WBE SMALL PURCHASE",
     "SOLE SOURCE",
-    "SMALL PURCHASE | WRITTEN",
+    "SMALL PURCHASE - WRITTEN",
     "EMERGENCY",
     "NEGOTIATED ACQUISITION AND DOE NEGOTIATED SERVICES",
     "ASSIGNMENT",
@@ -80,11 +83,49 @@ def build_5x2_table(classified):
     return table, counts
 
 
+def build_competitive_rate_chart(counts_5x2, freeman_halton_p, output_path):
+    labels, pcts, ns = [], [], []
+    for cat in MWBE_CATEGORIES:
+        comp = counts_5x2[cat]["competitive"]
+        noncomp = counts_5x2[cat]["non_competitive"]
+        total = comp + noncomp
+        if total == 0:
+            continue
+        labels.append(cat)
+        pcts.append(100 * comp / total)
+        ns.append(total)
+
+    order = sorted(range(len(pcts)), key=lambda i: -pcts[i])
+    labels = [labels[i] for i in order]
+    pcts = [pcts[i] for i in order]
+    ns = [ns[i] for i in order]
+
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    bars = ax.bar(labels, pcts, color="#2a78d6", width=0.6)
+    for bar, n in zip(bars, ns):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                f"n={n}", ha="center", va="bottom", fontsize=9, color="#52514e")
+
+    ax.set_ylabel("% of DIIT contracts awarded competitively")
+    ax.set_title(
+        "Share of DIIT contracts awarded competitively, by M/WBE category\n"
+        f"Freeman-Halton p = {freeman_halton_p:.4f}",
+        fontsize=10,
+    )
+    ax.set_ylim(0, max(pcts) + 10)
+    ax.grid(axis="y", alpha=0.3)
+    plt.xticks(rotation=15, ha="right")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fisher's exact / Freeman-Halton test: M/WBE status vs. competitive award method"
     )
     parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts.db")
+    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
     args = parser.parse_args()
 
     conn = sqlite3.connect(args.db)
@@ -107,7 +148,7 @@ if __name__ == "__main__":
     print(f"\n  Odds ratio = {odds_ratio:.3f}, p = {p_value:.4f}")
 
     print("\n--- Sensitivity check: excluding M/WBE Small Purchase Method ---")
-    print("  (that method is non-competitive by law and only available to M/WBE vendors,")
+    print("  (that method is non competitive by law and only available to M/WBE vendors,")
     print("   so its presence mechanically inflates the M/WBE non-competitive count)")
     classified_no_mwbesp = [
         (mwbe_category, bucket) for mwbe_category, bucket in classified
@@ -137,5 +178,9 @@ if __name__ == "__main__":
 
     stat_5x2, p_value_5x2 = fisher_exact(table_5x2)
     print(f"\n  Freeman-Halton p = {p_value_5x2:.4f}")
+
+    chart_path = f"{args.figures_dir}/competitive_award_rate_by_mwbe.png"
+    build_competitive_rate_chart(counts_5x2, p_value_5x2, chart_path)
+    print(f"\nSaved chart: {chart_path}")
 
     conn.close()
