@@ -92,6 +92,7 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
 
+    # Find header row as the one with the most non-None string cells
     best_idx, best_row, best_count = None, None, 0
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_search, values_only=True)):
         n_strings = sum(1 for v in row if isinstance(v, str) and v.strip())
@@ -103,6 +104,7 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
         wb.close()
         return [], []
 
+    # Map column index >> snake name
     col_positions = {j: header_to_snake(str(v)) for j, v in enumerate(best_row) if v is not None}
 
     rows = []
@@ -226,7 +228,7 @@ def parse_amount(val: str) -> float:
 def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
     if not rows:
         return
-    # Column order comes from the row dicts themselves, no separate column list needed
+
     cols = list(rows[0].keys())
     placeholders = ", ".join("?" for _ in cols)
     sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
@@ -291,6 +293,7 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
         GROUP BY prime_contract_id
     """)
 
+    #Sub-vendor INSERT removed: '-' placeholder leaked 40k phantom $0 rows
     conn.execute("""
         INSERT INTO contracts_unified
             (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
@@ -550,6 +553,8 @@ def build_market_share_chart(conn, output_path, top_n=10):
     pcts = [r[2] for r in top_rows] + [other_pct]
     colors = ["#2a78d6"] * len(top_rows) + ["#c3c2b7"]
 
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
     fig, ax = plt.subplots(figsize=(8, 6))
     y_pos = range(len(labels))
     ax.barh(y_pos, pcts, color=colors)
@@ -648,6 +653,7 @@ if __name__ == "__main__":
     parser.add_argument("--db", default=DB_PATH, help="Output SQLite database path")
     parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
     args = parser.parse_args()
+    os.makedirs(args.figures_dir, exist_ok=True)
 
     if not args.registered and not args.pending:
         parser.error("Provide at least --registered or --pending.")
@@ -656,12 +662,14 @@ if __name__ == "__main__":
     conn.execute("PRAGMA foreign_keys = ON")
     create_derived_tables(conn)
 
+    # Load each file, build its table dynamically from actual columns, then insert
     sources = []
     if args.registered:
         sources.append(("contracts_registered", args.registered, "registered"))
     if args.pending:
         sources.append(("contracts_pending", args.pending, "pending"))
     for path in (args.sources or []):
+        # Table name comes from filename
         stem = os.path.splitext(os.path.basename(path))[0]
         table_name = header_to_snake(stem)
         sources.append((table_name, path, table_name))

@@ -1,4 +1,5 @@
 import argparse
+import os
 import sqlite3
 import statistics
 
@@ -25,8 +26,10 @@ def summarize(label, amounts):
           f"mean=${statistics.mean(amounts):,.2f}  "
           f"min=${min(amounts):,.2f}  max=${max(amounts):,.2f}")
 
+
 def rank_biserial_effect_size(u_stat, n1, n2):
     return u_stat / (n1 * n2)
+
 
 def dollar_formatter(x, _):
     if x >= 1_000_000:
@@ -59,6 +62,7 @@ def build_boxplot(non_mwbe, mwbe, p_value, output_path):
     )
     ax.grid(axis="y", alpha=0.3, which="major")
     plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close(fig)
 
@@ -82,17 +86,19 @@ def build_ecdf(non_mwbe, mwbe, p_value, output_path):
     ax.set_ylim(0, 100)
     ax.axhline(50, color="gray", linewidth=0.7, linestyle=":")
     plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close(fig)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Wilcoxon rank-sum test: DIIT contract award size, M/WBE vs non-M/WBE"
+        description="Wilcoxon rank-sum test: DIIT contract award size, M/WBE vs non-M/WBE."
     )
     parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts.db")
     parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
     args = parser.parse_args()
+    os.makedirs(args.figures_dir, exist_ok=True)
 
     conn = sqlite3.connect(args.db)
 

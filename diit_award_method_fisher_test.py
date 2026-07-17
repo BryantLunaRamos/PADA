@@ -1,4 +1,5 @@
 import argparse
+import os
 import sqlite3
 
 import matplotlib
@@ -30,6 +31,7 @@ NON_COMPETITIVE_METHODS = {
     "GRANTS",
     "GRANT RENEWAL",
 }
+
 
 MWBE_CATEGORIES = [
     "Non-M/WBE", "Asian American", "Women (Non-Minority)",
@@ -116,17 +118,19 @@ def build_competitive_rate_chart(counts_5x2, freeman_halton_p, output_path):
     ax.grid(axis="y", alpha=0.3)
     plt.xticks(rotation=15, ha="right")
     plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close(fig)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Fisher's exact / Freeman-Halton test: M/WBE status vs. competitive award method"
+        description="Fisher's exact / Freeman-Halton test: M/WBE status vs. competitive award method."
     )
     parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts.db")
     parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
     args = parser.parse_args()
+    os.makedirs(args.figures_dir, exist_ok=True)
 
     conn = sqlite3.connect(args.db)
     classified, excluded = fetch_classified_rows(conn)
@@ -148,7 +152,7 @@ if __name__ == "__main__":
     print(f"\n  Odds ratio = {odds_ratio:.3f}, p = {p_value:.4f}")
 
     print("\n--- Sensitivity check: excluding M/WBE Small Purchase Method ---")
-    print("  (that method is non competitive by law and only available to M/WBE vendors,")
+    print("  (that method is non-competitive by law and only available to M/WBE vendors,")
     print("   so its presence mechanically inflates the M/WBE non-competitive count)")
     classified_no_mwbesp = [
         (mwbe_category, bucket) for mwbe_category, bucket in classified
