@@ -1,4 +1,4 @@
-'''
+'''3
 Bryant Luna-Ramos
 6/18/2026
 
@@ -66,7 +66,7 @@ if __name__ == "__main__":
     print(f"\n{'=' * 60}\n RESULTS \n{'=' * 60}")
     print("If Test 2's body is not empty and contains code 1000 / "
           "\"Required parameter 'type_of_data' is missing\" means the API is "
-          "alive an healthy\n")
+          "alive and healthy\n")
     print("If Test 2's body is empty despite a 200 status, conclusive dead"
           "(server side WAF/Imperva voiding all requests, not a "
           "parameter or agency_code issue)\n")

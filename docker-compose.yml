@@ -1,0 +1,8 @@
+services:
+  diit-analysis:
+    build: .
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    command: ["--db", "/app/output/diit_contracts.db", "--figures-dir", "/app/output/figures"]

@@ -4,6 +4,8 @@ diit_contracts.db
 registered.csv
 pending.csv
 
+
+
 complete_entity_summary_website.xlsx
 complete_entity_principal_websites.xlsx
 complete_entity_performance_website.xlsx
@@ -20,3 +22,4 @@ __pycache__/
 
 .env
 /figures
+/output

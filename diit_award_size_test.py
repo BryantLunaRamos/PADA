@@ -1,16 +1,12 @@
 import argparse
-import os
 import sqlite3
 import statistics
 
-import matplotlib
-matplotlib.use("Agg")
+import common
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 from scipy.stats import mannwhitneyu
-
-DB_PATH = "diit_contracts.db"
 
 
 def fetch_amounts(conn, mwbe_filter):
@@ -61,10 +57,7 @@ def build_boxplot(non_mwbe, mwbe, p_value, output_path):
         fontsize=10,
     )
     ax.grid(axis="y", alpha=0.3, which="major")
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.savefig(output_path, dpi=150)
-    plt.close(fig)
+    common.save_chart(fig, output_path)
 
 
 def build_ecdf(non_mwbe, mwbe, p_value, output_path):
@@ -85,20 +78,16 @@ def build_ecdf(non_mwbe, mwbe, p_value, output_path):
     ax.legend(loc="lower right", frameon=False)
     ax.set_ylim(0, 100)
     ax.axhline(50, color="gray", linewidth=0.7, linestyle=":")
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.savefig(output_path, dpi=150)
-    plt.close(fig)
+    common.save_chart(fig, output_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Wilcoxon rank-sum test: DIIT contract award size, M/WBE vs non-M/WBE."
     )
-    parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts.db")
-    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
+    common.add_db_figures_args(parser)
     args = parser.parse_args()
-    os.makedirs(args.figures_dir, exist_ok=True)
+    common.ensure_figures_dir(args.figures_dir)
 
     conn = sqlite3.connect(args.db)
 

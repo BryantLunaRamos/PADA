@@ -1,14 +1,6 @@
 """
 Bryant Luna-Ramos
 6/16/26
-
-How to run:
-    python diit_pipeline.py --registered registered.csv --pending pending.csv
-    python diit_pipeline.py --registered registered.csv --pending pending.csv \
-        --sources complete_entity_principal_websites.xlsx \
-                  complete_entity_relatedentities_website.xlsx \
-                  complete_entity_othernames_website.xlsx \
-                  complete_entity_summary_website.xlsx
 """
 
 import argparse
@@ -18,32 +10,25 @@ import re
 import sqlite3
 from difflib import SequenceMatcher
 
-import matplotlib
-matplotlib.use("Agg")
+import common
 import matplotlib.pyplot as plt
 import openpyxl
-
-DB_PATH = "diit_contracts.db"
 
 DIIT_KEYWORDS = [
     "DIIT", "information technology", "instructional technology", "technology",
     "software", "hardware", "network", "server", "laptop", "desktop", "tablet",
     "chromebook", "wireless", "data center", "cabling", "IT services",
-    "IT support", "IT consulting", "cloud", "digital", "computer", "device", "cyber",
-    "telecommunications", "infrastructure", "system",
+    "IT support", "IT consulting", "cloud", "digital", "computer", "device",
+    "cyber", "telecommunications", "infrastructure", "system",
 ]
 
 DIIT_EXCLUDE_PHRASES = [
-    "family child care",
-    "crisis management system",
-    "system-wide", "systemwide", "system wide",
-    "fire alarm", "fire suppression", "sprinkler", "standpipe",
-    "security system",
-    "hvac", "air condition", "boiler", "plumbing", "backflow", "fuel oil",
-    "public address system", "gas leak detection", "de-watering",
+    "family child care", "crisis management system", "system-wide", "systemwide",
+    "system wide", "fire alarm", "fire suppression", "sprinkler", "standpipe",
+    "security system", "hvac", "air condition", "boiler", "plumbing", "backflow",
+    "fuel oil", "public address system", "gas leak detection", "de-watering",
     "kitchen exhaust", "water treatment", "direct digital control",
-    "window shades",
-    "legal process server",
+    "window shades", "legal process server",
     "vendor does not have order in system", "doc posted in city",
 ]
 
@@ -59,7 +44,6 @@ GENERIC_SUFFIXES = {
 
 AUTO_MATCH_THRESHOLD = 0.90
 REVIEW_MATCH_THRESHOLD = 0.75
-
 
 '''
 Header normalization
@@ -130,11 +114,6 @@ def load_table(path: str, table_name: str, label: str = None) -> tuple:
 '''
 Database
 '''
-
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
 
 
 def create_raw_table(conn: sqlite3.Connection, table_name: str, cols: list) -> None:
@@ -244,20 +223,35 @@ def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
 DIIT flagging, two-pass SQL on raw tables
 '''
 
+def _like_clause(column: str, terms: list) -> tuple:
+    clause = " OR ".join(f"{column} LIKE ?" for _ in terms)
+    params = [f"%{t}%" for t in terms]
+    return clause, params
+
+
 def flag_diit_sql(conn: sqlite3.Connection, loaded: set) -> None:
     if "contracts_registered" in loaded:
-        like_prime = " OR ".join(f"prime_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
-        like_sub   = " OR ".join(f"sub_contract_purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
-        conn.execute(f"UPDATE contracts_registered SET is_diit=1 WHERE {like_prime} OR {like_sub}")
-        excl_prime = " OR ".join(f"prime_contract_purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
-        excl_sub   = " OR ".join(f"sub_contract_purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
-        conn.execute(f"UPDATE contracts_registered SET is_diit=0 WHERE is_diit=1 AND ({excl_prime} OR {excl_sub})")
+        prime_kw, prime_kw_params = _like_clause("prime_contract_purpose", DIIT_KEYWORDS)
+        sub_kw, sub_kw_params = _like_clause("sub_contract_purpose", DIIT_KEYWORDS)
+        conn.execute(
+            f"UPDATE contracts_registered SET is_diit=1 WHERE {prime_kw} OR {sub_kw}",
+            prime_kw_params + sub_kw_params,
+        )
+        prime_excl, prime_excl_params = _like_clause("prime_contract_purpose", DIIT_EXCLUDE_PHRASES)
+        sub_excl, sub_excl_params = _like_clause("sub_contract_purpose", DIIT_EXCLUDE_PHRASES)
+        conn.execute(
+            f"UPDATE contracts_registered SET is_diit=0 WHERE is_diit=1 AND ({prime_excl} OR {sub_excl})",
+            prime_excl_params + sub_excl_params,
+        )
 
     if "contracts_pending" in loaded:
-        like_pend = " OR ".join(f"purpose LIKE '%{kw}%'" for kw in DIIT_KEYWORDS)
-        conn.execute(f"UPDATE contracts_pending SET is_diit=1 WHERE {like_pend}")
-        excl_pend = " OR ".join(f"purpose LIKE '%{p}%'" for p in DIIT_EXCLUDE_PHRASES)
-        conn.execute(f"UPDATE contracts_pending SET is_diit=0 WHERE is_diit=1 AND ({excl_pend})")
+        pend_kw, pend_kw_params = _like_clause("purpose", DIIT_KEYWORDS)
+        conn.execute(f"UPDATE contracts_pending SET is_diit=1 WHERE {pend_kw}", pend_kw_params)
+        pend_excl, pend_excl_params = _like_clause("purpose", DIIT_EXCLUDE_PHRASES)
+        conn.execute(
+            f"UPDATE contracts_pending SET is_diit=0 WHERE is_diit=1 AND ({pend_excl})",
+            pend_excl_params,
+        )
 
     conn.commit()
 
@@ -333,7 +327,6 @@ def build_vendor_summary_sql(conn: sqlite3.Connection) -> None:
 
 
 def compute_hhi(conn: sqlite3.Connection) -> float:
-    # HHI = sum of squared market shares (0-10000 scale)
     rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
@@ -433,13 +426,17 @@ class UnionFind:
 
 
 def cluster_by_shared_principals(conn, uf, confirmed_links):
-    vendor_to_principals = {}
-    for cb_name, passport_name in confirmed_links.items():
-        rows = conn.execute(
-            "SELECT DISTINCT principal_name FROM completeentityprincipalwebsites WHERE vendor_name = ?",
-            (passport_name,)
-        ).fetchall()
-        vendor_to_principals[cb_name] = {r[0].strip().upper() for r in rows if r[0] and r[0].strip()}
+    passport_to_principals = {}
+    for passport_name, principal_name in conn.execute(
+        "SELECT vendor_name, principal_name FROM completeentityprincipalwebsites"
+    ):
+        if principal_name and principal_name.strip():
+            passport_to_principals.setdefault(passport_name, set()).add(principal_name.strip().upper())
+
+    vendor_to_principals = {
+        cb_name: passport_to_principals.get(passport_name, set())
+        for cb_name, passport_name in confirmed_links.items()
+    }
 
     principal_to_vendors = {}
     for cb_name, principals in vendor_to_principals.items():
@@ -460,16 +457,17 @@ def cluster_by_shared_principals(conn, uf, confirmed_links):
 
 def cluster_by_related_entities(conn, uf, confirmed_links):
     checkbook_index = build_block_index(list(confirmed_links.keys()))
-    related_pairs = []
 
+    passport_to_related = {}
+    for passport_name, related_name in conn.execute(
+        "SELECT vendor_name, related_entity_name FROM completeentityrelatedentitieswebsite"
+    ):
+        if related_name and related_name.strip():
+            passport_to_related.setdefault(passport_name, set()).add(related_name)
+
+    related_pairs = []
     for cb_name, passport_name in confirmed_links.items():
-        rows = conn.execute(
-            "SELECT DISTINCT related_entity_name FROM completeentityrelatedentitieswebsite WHERE vendor_name = ?",
-            (passport_name,)
-        ).fetchall()
-        for (related_name,) in rows:
-            if not related_name or not related_name.strip():
-                continue
+        for related_name in passport_to_related.get(passport_name, ()):
             match_name, score = best_match(related_name, checkbook_index)
             if match_name and classify_score(score) in ("exact", "fuzzy_auto") and match_name != cb_name:
                 uf.union(cb_name, match_name)
@@ -479,12 +477,15 @@ def cluster_by_related_entities(conn, uf, confirmed_links):
 
 
 def flag_shared_addresses(conn, confirmed_links):
+    passport_to_address = {}
+    for passport_name, line1, zip_code in conn.execute(
+        "SELECT vendor_name, address_line_1, zip_code FROM completeentitysummarywebsite"
+    ):
+        passport_to_address.setdefault(passport_name, (line1, zip_code))
+
     address_to_vendors = {}
     for cb_name, passport_name in confirmed_links.items():
-        row = conn.execute(
-            "SELECT address_line_1, zip_code FROM completeentitysummarywebsite WHERE vendor_name = ?",
-            (passport_name,)
-        ).fetchone()
+        row = passport_to_address.get(passport_name)
         if not row:
             continue
         key = normalize_address(row[0], row[1])
@@ -553,8 +554,6 @@ def build_market_share_chart(conn, output_path, top_n=10):
     pcts = [r[2] for r in top_rows] + [other_pct]
     colors = ["#2a78d6"] * len(top_rows) + ["#c3c2b7"]
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
     fig, ax = plt.subplots(figsize=(8, 6))
     y_pos = range(len(labels))
     ax.barh(y_pos, pcts, color=colors)
@@ -564,9 +563,7 @@ def build_market_share_chart(conn, output_path, top_n=10):
     ax.set_xlabel("% of total DIIT contract dollars")
     ax.set_title("Share of DIIT contract dollars by vendor/ownership cluster")
     ax.grid(axis="x", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close(fig)
+    common.save_chart(fig, output_path)
 
 
 def run_ownership_clustering(conn, figures_dir="."):
@@ -650,10 +647,9 @@ if __name__ == "__main__":
     parser.add_argument("--pending",         help="Checkbook pending contracts CSV")
     parser.add_argument("--sources", nargs="+", metavar="FILE",
                         help="Any additional source files (CSV or XLSX). Table name derived from filename.")
-    parser.add_argument("--db", default=DB_PATH, help="Output SQLite database path")
-    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
+    common.add_db_figures_args(parser, db_help="Output SQLite database path")
     args = parser.parse_args()
-    os.makedirs(args.figures_dir, exist_ok=True)
+    common.ensure_figures_dir(args.figures_dir)
 
     if not args.registered and not args.pending:
         parser.error("Provide at least --registered or --pending.")

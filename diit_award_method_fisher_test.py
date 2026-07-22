@@ -1,13 +1,9 @@
 import argparse
-import os
 import sqlite3
 
-import matplotlib
-matplotlib.use("Agg")
+import common
 import matplotlib.pyplot as plt
 from scipy.stats import fisher_exact
-
-DB_PATH = "diit_contracts.db"
 
 COMPETITIVE_METHODS = {
     "COMPETITIVE SEALED BIDDING",
@@ -117,20 +113,16 @@ def build_competitive_rate_chart(counts_5x2, freeman_halton_p, output_path):
     ax.set_ylim(0, max(pcts) + 10)
     ax.grid(axis="y", alpha=0.3)
     plt.xticks(rotation=15, ha="right")
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.savefig(output_path, dpi=150)
-    plt.close(fig)
+    common.save_chart(fig, output_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fisher's exact / Freeman-Halton test: M/WBE status vs. competitive award method."
     )
-    parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts.db")
-    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
+    common.add_db_figures_args(parser)
     args = parser.parse_args()
-    os.makedirs(args.figures_dir, exist_ok=True)
+    common.ensure_figures_dir(args.figures_dir)
 
     conn = sqlite3.connect(args.db)
     classified, excluded = fetch_classified_rows(conn)
@@ -154,9 +146,6 @@ if __name__ == "__main__":
     print("\n--- Sensitivity check: excluding M/WBE Small Purchase Method ---")
     print("  (that method is non-competitive by law and only available to M/WBE vendors,")
     print("   so its presence mechanically inflates the M/WBE non-competitive count)")
-    classified_no_mwbesp = [
-        (mwbe_category, bucket) for mwbe_category, bucket in classified
-    ]
     conn2_rows = conn.execute(
         "SELECT mwbe_category, award_method FROM contracts_unified "
         "WHERE is_diit = 1 AND award_method != 'M/WBE SMALL PURCHASE'"

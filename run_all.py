@@ -2,7 +2,7 @@ import argparse
 import subprocess
 import sys
 
-DB_PATH = "diit_contracts_pull.db"
+import common
 
 STAT_TEST_SCRIPTS = [
     "diit_award_size_test.py",
@@ -18,8 +18,7 @@ if __name__ == "__main__":
     parser.add_argument("--pending", help="Checkbook pending contracts CSV")
     parser.add_argument("--sources", nargs="+", metavar="FILE",
                         help="Additional PASSPort/other source files (CSV or XLSX)")
-    parser.add_argument("--db", default=DB_PATH, help="Path to diit_contracts_pull.db")
-    parser.add_argument("--figures-dir", default=".", help="Directory to save chart PNGs")
+    common.add_db_figures_args(parser)
     args = parser.parse_args()
 
     if args.registered or args.pending:
