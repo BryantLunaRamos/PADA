@@ -51,9 +51,9 @@ def build_boxplot(non_mwbe, mwbe, p_value, output_path):
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(dollar_formatter))
     ax.set_ylabel("DIIT contract award amount")
     ax.set_title(
-        "DIIT contract award size by M/WBE status (placeholder $1 rows excluded)\n"
+        "DIIT contract award size by M/WBE status\n"
         f"Mann-Whitney U p = {p_value:.5f}  |  "
-        f"medians: ${statistics.median(non_mwbe):,.0f} vs ${statistics.median(mwbe):,.0f}",
+        f"medians: ${statistics.median(non_mwbe):,.0f} vs. ${statistics.median(mwbe):,.0f}",
         fontsize=10,
     )
     ax.grid(axis="y", alpha=0.3, which="major")

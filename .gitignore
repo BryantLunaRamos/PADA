@@ -5,13 +5,6 @@ registered.csv
 pending.csv
 *.env
 
-
-complete_entity_summary_website.xlsx
-complete_entity_principal_websites.xlsx
-complete_entity_performance_website.xlsx
-complete_entity_relatedentities_website.xlsx
-complete_entity_othernames_website.xlsx
-
 *.db
 *.csv
 *.xlsx
@@ -20,6 +13,3 @@ __pycache__/
 *.pyc
 *.pyo
 
-.env
-/figures
-/output

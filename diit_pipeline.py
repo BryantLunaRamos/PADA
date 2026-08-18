@@ -5,37 +5,18 @@ Bryant Luna-Ramos
 
 import argparse
 import csv
+import importlib
+import importlib.util
 import os
 import re
 import sqlite3
 from difflib import SequenceMatcher
-
 import common
 import matplotlib.pyplot as plt
+import numpy as np
 import openpyxl
-
-DIIT_KEYWORDS = [
-    "DIIT", "information technology", "instructional technology", "technology",
-    "software", "hardware", "network", "server", "laptop", "desktop", "tablet",
-    "chromebook", "wireless", "data center", "cabling", "IT services",
-    "IT support", "IT consulting", "cloud", "digital", "computer", "device",
-    "cyber", "telecommunications", "infrastructure", "system",
-]
-
-DIIT_EXCLUDE_PHRASES = [
-    "family child care", "crisis management system", "system-wide", "systemwide",
-    "system wide", "fire alarm", "fire suppression", "sprinkler", "standpipe",
-    "security system", "hvac", "air condition", "boiler", "plumbing", "backflow",
-    "fuel oil", "public address system", "gas leak detection", "de-watering",
-    "kitchen exhaust", "water treatment", "direct digital control",
-    "window shades", "legal process server",
-    "vendor does not have order in system", "doc posted in city",
-]
-
-TABLE_CONFIGS = {
-    "contracts_registered": ["is_diit INTEGER DEFAULT 0"],
-    "contracts_pending":    ["is_diit INTEGER DEFAULT 0"],
-}
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 GENERIC_SUFFIXES = {
     "INC", "INCORPORATED", "LLC", "LLP", "LP", "LTD", "LIMITED",
@@ -45,21 +26,33 @@ GENERIC_SUFFIXES = {
 AUTO_MATCH_THRESHOLD = 0.90
 REVIEW_MATCH_THRESHOLD = 0.75
 
-'''
-Header normalization
-'''
+MIN_TOKENS_FOR_SIMILARITY = 2
+
 def header_to_snake(h: str) -> str:
-    # Strip all non-alphanumeric chars (M/WBE >> MWBE, % >> gone), then snake_case
     clean = re.sub(r'[^a-zA-Z0-9 ]', '', h)
     return '_'.join(p.lower() for p in clean.split())
 
 def is_amount_col(col: str) -> bool:
     return "amount" in col or "paid_to_date" in col or "spend_to_date" in col or "spent_to_date" in col
 
+def is_text_col(col: str) -> bool:
+    col_l = col.lower()
+    return "purpose" in col_l or "description" in col_l or "scope" in col_l
 
-'''
-Loaders, both return (rows: list[dict], cols: list[str])
-'''
+
+def load_seed_module(spec: str):
+    if spec.endswith(".py") and os.path.isfile(spec):
+        module_spec = importlib.util.spec_from_file_location("diit_seed_module", spec)
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+    else:
+        module = importlib.import_module(spec)
+
+    for attr in ("KEYWORDS", "EXCLUDE_PHRASES"):
+        if not isinstance(getattr(module, attr, None), list):
+            raise ValueError(f"Seed module {spec!r} must define {attr} as a list[str].")
+    return module
+
 
 def load_csv_rows(path: str, label: str) -> tuple:
     rows = []
@@ -76,7 +69,6 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
 
-    # Find header row as the one with the most non-None string cells
     best_idx, best_row, best_count = None, None, 0
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_search, values_only=True)):
         n_strings = sum(1 for v in row if isinstance(v, str) and v.strip())
@@ -88,7 +80,6 @@ def load_excel_rows(path: str, label: str, max_search: int = 20) -> tuple:
         wb.close()
         return [], []
 
-    # Map column index >> snake name
     col_positions = {j: header_to_snake(str(v)) for j, v in enumerate(best_row) if v is not None}
 
     rows = []
@@ -111,13 +102,9 @@ def load_table(path: str, table_name: str, label: str = None) -> tuple:
     return load_csv_rows(path, label)
 
 
-'''
-Database
-'''
-
 
 def create_raw_table(conn: sqlite3.Connection, table_name: str, cols: list) -> None:
-    extra = TABLE_CONFIGS.get(table_name, [])
+    extra = ["is_diit INTEGER DEFAULT 0", "flag_score REAL DEFAULT 0.0"] if any(is_text_col(c) for c in cols) else []
     col_defs = ",\n        ".join(f"{c} REAL" if is_amount_col(c) else f"{c} TEXT" for c in cols)
     extra_defs = (",\n        " + ",\n        ".join(extra)) if extra else ""
     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
@@ -142,7 +129,8 @@ def create_derived_tables(conn: sqlite3.Connection) -> None:
         start_date      TEXT,
         end_date        TEXT,
         status          TEXT,
-        is_diit         INTEGER DEFAULT 0
+        is_diit         INTEGER DEFAULT 0,
+        flag_score      REAL
     );
 
     CREATE TABLE vendor_summary (
@@ -218,47 +206,107 @@ def insert_rows(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
     conn.executemany(sql, values)
     conn.commit()
 
+def _like_clause(columns: list, terms: list) -> tuple:
+    pairs = [(c, t) for c in columns for t in terms]
+    clause = " OR ".join(f"{c} LIKE ?" for c, _ in pairs)
+    params = [f"%{t}%" for _, t in pairs]
+    return clause, params
 
-'''
-DIIT flagging, two-pass SQL on raw tables
-'''
+_EXCLUDE_GAP_WORDS = 2
 
-def _like_clause(column: str, terms: list) -> tuple:
-    clause = " OR ".join(f"{column} LIKE ?" for _ in terms)
-    params = [f"%{t}%" for t in terms]
+def _exclude_phrase_regex(phrase: str) -> str:
+    words = phrase.split()
+    pattern = re.escape(words[0])
+    for w in words[1:]:
+        pattern += r"\s+(?:\S+\s+){0,%d}%s" % (_EXCLUDE_GAP_WORDS, re.escape(w))
+    return pattern
+
+
+def _register_regexp(conn: sqlite3.Connection) -> None:
+    def regexp(pattern, value):
+        return value is not None and re.search(pattern, value, re.IGNORECASE) is not None
+    conn.create_function("REGEXP", 2, regexp)
+
+
+def _exclude_clause(columns: list, phrases: list) -> tuple:
+    pairs = [(c, p) for c in columns for p in phrases]
+    clause = " OR ".join(f"{c} REGEXP ?" for c, _ in pairs)
+    params = [_exclude_phrase_regex(p) for _, p in pairs]
     return clause, params
 
 
-def flag_diit_sql(conn: sqlite3.Connection, loaded: set) -> None:
-    if "contracts_registered" in loaded:
-        prime_kw, prime_kw_params = _like_clause("prime_contract_purpose", DIIT_KEYWORDS)
-        sub_kw, sub_kw_params = _like_clause("sub_contract_purpose", DIIT_KEYWORDS)
-        conn.execute(
-            f"UPDATE contracts_registered SET is_diit=1 WHERE {prime_kw} OR {sub_kw}",
-            prime_kw_params + sub_kw_params,
-        )
-        prime_excl, prime_excl_params = _like_clause("prime_contract_purpose", DIIT_EXCLUDE_PHRASES)
-        sub_excl, sub_excl_params = _like_clause("sub_contract_purpose", DIIT_EXCLUDE_PHRASES)
-        conn.execute(
-            f"UPDATE contracts_registered SET is_diit=0 WHERE is_diit=1 AND ({prime_excl} OR {sub_excl})",
-            prime_excl_params + sub_excl_params,
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> list:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")]
+
+
+def _score_table_rows(conn: sqlite3.Connection, table_name: str, text_cols: list, keywords: list):
+    select_cols = ", ".join(text_cols)
+    rows = conn.execute(f"SELECT rowid, {select_cols} FROM {table_name}").fetchall()
+    if not rows:
+        return [], np.array([])
+
+    rowids = [r[0] for r in rows]
+    texts = [" ".join(v for v in r[1:] if v) for r in rows]
+
+    vectorizer = TfidfVectorizer(analyzer=common.stemmed_analyzer, min_df=1)
+    vectorizer.fit(keywords + texts)
+    seed_matrix = vectorizer.transform(keywords)
+    doc_matrix = vectorizer.transform(texts)
+    best_sim = cosine_similarity(doc_matrix, seed_matrix).max(axis=1)
+
+    token_counts = np.array([common.count_alpha_tokens(t) for t in texts])
+    best_sim[token_counts < MIN_TOKENS_FOR_SIMILARITY] = 0.0
+
+    return rowids, best_sim
+
+
+def flag_target_contracts(conn: sqlite3.Connection, loaded: set, seed, threshold: float) -> None:
+    _register_regexp(conn)
+
+    for table_name in sorted(loaded):
+        cols = _table_columns(conn, table_name)
+        text_cols = [c for c in cols if is_text_col(c)]
+        if not text_cols:
+            continue
+
+        kw_clause, kw_params = _like_clause(text_cols, seed.KEYWORDS)
+        conn.execute(f"UPDATE {table_name} SET is_diit=1 WHERE {kw_clause}", kw_params)
+        kw_flagged = {r[0] for r in conn.execute(f"SELECT rowid FROM {table_name} WHERE is_diit=1")}
+
+        rowids, best_sim = _score_table_rows(conn, table_name, text_cols, seed.KEYWORDS)
+        conn.executemany(
+            f"UPDATE {table_name} SET flag_score=? WHERE rowid=?",
+            [(float(score), rowid) for rowid, score in zip(rowids, best_sim)],
         )
 
-    if "contracts_pending" in loaded:
-        pend_kw, pend_kw_params = _like_clause("purpose", DIIT_KEYWORDS)
-        conn.execute(f"UPDATE contracts_pending SET is_diit=1 WHERE {pend_kw}", pend_kw_params)
-        pend_excl, pend_excl_params = _like_clause("purpose", DIIT_EXCLUDE_PHRASES)
+        sim_flagged = {rowid for rowid, score in zip(rowids, best_sim) if score >= threshold}
+        added_by_similarity = sim_flagged - kw_flagged
+        if added_by_similarity:
+            conn.executemany(
+                f"UPDATE {table_name} SET is_diit=1 WHERE rowid=?",
+                [(rowid,) for rowid in added_by_similarity],
+            )
+
+        before_veto = len(kw_flagged | sim_flagged)
+        excl_clause, excl_params = _exclude_clause(text_cols, seed.EXCLUDE_PHRASES)
         conn.execute(
-            f"UPDATE contracts_pending SET is_diit=0 WHERE is_diit=1 AND ({pend_excl})",
-            pend_excl_params,
+            f"UPDATE {table_name} SET is_diit=0 WHERE is_diit=1 AND ({excl_clause})",
+            excl_params,
         )
+        final_count = conn.execute(f"SELECT COUNT(*) FROM {table_name} WHERE is_diit=1").fetchone()[0]
+
+        print(f"\n[{table_name}] text columns: {', '.join(text_cols)}")
+        print(f"  keyword match:        {len(kw_flagged)}")
+        print(f"  + TF-IDF similarity:  {len(added_by_similarity)} (threshold={threshold})")
+        print(f"  exclude-phrase veto:  -{before_veto - final_count}")
+        print(f"  final is_diit=1:      {final_count}")
+        if len(best_sim):
+            pcts = [50, 75, 90, 95, 99]
+            dist = "  ".join(f"p{p}={np.percentile(best_sim, p):.3f}" for p in pcts)
+            print(f"  score distribution:   {dist}")
 
     conn.commit()
 
-
-'''
-Analysis, unified table, vendor summary, HHI
-'''
 
 def build_unified_table(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM contracts_unified")
@@ -267,7 +315,7 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
         INSERT INTO contracts_unified
             (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
              current_amount, original_amount, award_method, contract_type,
-             start_date, end_date, status, is_diit)
+             start_date, end_date, status, is_diit, flag_score)
         SELECT
             prime_contract_id,
             MAX(prime_vendor),
@@ -281,22 +329,22 @@ def build_unified_table(conn: sqlite3.Connection) -> None:
             MAX(prime_contract_start_date),
             MAX(prime_contract_end_date),
             'registered',
-            MAX(is_diit)
+            MAX(is_diit),
+            MAX(flag_score)
         FROM contracts_registered
         WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
         GROUP BY prime_contract_id
     """)
 
-    #Sub-vendor INSERT removed: '-' placeholder leaked 40k phantom $0 rows
     conn.execute("""
         INSERT INTO contracts_unified
             (contract_id, vendor_name, vendor_role, mwbe_category, purpose,
              current_amount, original_amount, award_method, contract_type,
-             start_date, end_date, status, is_diit)
+             start_date, end_date, status, is_diit, flag_score)
         SELECT
             contract_id, prime_vendor, 'prime', prime_mwbe_category, purpose,
             current_amount, original_amount, award_method, contract_type,
-            start_date, end_date, 'pending', is_diit
+            start_date, end_date, 'pending', is_diit, flag_score
         FROM contracts_pending
         WHERE prime_vendor IS NOT NULL AND prime_vendor != ''
     """)
@@ -330,10 +378,6 @@ def compute_hhi(conn: sqlite3.Connection) -> float:
     rows = conn.execute("SELECT pct_of_total FROM vendor_summary").fetchall()
     return sum(r[0] ** 2 for r in rows if r[0] is not None)
 
-
-'''
-PASSPort name matching and ownership clustering
-'''
 
 def normalize_name(name: str) -> str:
     name = name.upper()
@@ -453,7 +497,6 @@ def cluster_by_shared_principals(conn, uf, confirmed_links):
                 shared_principal_pairs.append((principal, first, other))
 
     return shared_principal_pairs
-
 
 def cluster_by_related_entities(conn, uf, confirmed_links):
     checkbook_index = build_block_index(list(confirmed_links.keys()))
@@ -635,10 +678,6 @@ def run_ownership_clustering(conn, figures_dir="."):
     print(f"\nSaved chart: {chart_path}")
 
 
-'''
-Main
-'''
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Checkbook NYC + PASSPort exports >> SQLite >> DIIT contract analysis + ownership clustering."
@@ -647,9 +686,16 @@ if __name__ == "__main__":
     parser.add_argument("--pending",         help="Checkbook pending contracts CSV")
     parser.add_argument("--sources", nargs="+", metavar="FILE",
                         help="Any additional source files (CSV or XLSX). Table name derived from filename.")
+    parser.add_argument("--seed-module", default="diit_seed",
+                        help="Importable module name or .py file path defining KEYWORDS/EXCLUDE_PHRASES "
+                             "(default: diit_seed, this project's DIIT keyword list)")
+    parser.add_argument("--flag-threshold", type=float, default=0.25,
+                        help="Minimum TF-IDF cosine similarity to a seed keyword to auto-flag a contract "
+                             "(default: 0.25, calibrated against this project's data)")
     common.add_db_figures_args(parser, db_help="Output SQLite database path")
     args = parser.parse_args()
     common.ensure_figures_dir(args.figures_dir)
+    seed = load_seed_module(args.seed_module)
 
     if not args.registered and not args.pending:
         parser.error("Provide at least --registered or --pending.")
@@ -658,14 +704,12 @@ if __name__ == "__main__":
     conn.execute("PRAGMA foreign_keys = ON")
     create_derived_tables(conn)
 
-    # Load each file, build its table dynamically from actual columns, then insert
     sources = []
     if args.registered:
         sources.append(("contracts_registered", args.registered, "registered"))
     if args.pending:
         sources.append(("contracts_pending", args.pending, "pending"))
     for path in (args.sources or []):
-        # Table name comes from filename
         stem = os.path.splitext(os.path.basename(path))[0]
         table_name = header_to_snake(stem)
         sources.append((table_name, path, table_name))
@@ -681,11 +725,11 @@ if __name__ == "__main__":
     pend_n = conn.execute("SELECT COUNT(*) FROM contracts_pending").fetchone()[0]    if "contracts_pending"    in loaded else 0
     print(f"\nLoaded {reg_n:,} registered and {pend_n} pending rows into {args.db}")
 
-    flag_diit_sql(conn, loaded)
+    flag_target_contracts(conn, loaded, seed, args.flag_threshold)
     build_unified_table(conn)
 
     diit_count = conn.execute("SELECT COUNT(*) FROM contracts_unified WHERE is_diit=1").fetchone()[0]
-    print(f"Flagged {diit_count} unified rows as likely DIIT/tech contracts.")
+    print(f"\nFlagged {diit_count} unified rows as likely DIIT/tech contracts.")
 
     build_vendor_summary_sql(conn)
     hhi = compute_hhi(conn)

@@ -144,8 +144,6 @@ if __name__ == "__main__":
     print(f"\n  Odds ratio = {odds_ratio:.3f}, p = {p_value:.4f}")
 
     print("\n--- Sensitivity check: excluding M/WBE Small Purchase Method ---")
-    print("  (that method is non-competitive by law and only available to M/WBE vendors,")
-    print("   so its presence mechanically inflates the M/WBE non-competitive count)")
     conn2_rows = conn.execute(
         "SELECT mwbe_category, award_method FROM contracts_unified "
         "WHERE is_diit = 1 AND award_method != 'M/WBE SMALL PURCHASE'"

@@ -29,7 +29,6 @@ VALID_REQUEST = """<?xml version="1.0" encoding="UTF-8"?>
     </response_columns>
 </request>"""
 
-# Leaving out the required type_of_data elem to malform the request
 MALFORMED_REQUEST = """<?xml version="1.0" encoding="UTF-8"?>
 <request>
     <records_from>1</records_from>
