@@ -3,7 +3,7 @@
 diit_contracts.db
 registered.csv
 pending.csv
-
+*.env
 
 
 complete_entity_summary_website.xlsx
